@@ -77,8 +77,14 @@ namespace HangfireService {
                     // services.AddSingleton(databases);
                     // services.AddHostedService<TenantBackgroundService>(); // Run background service
                     services.AddHangfire(config => {
+                        config.SetDataCompatibilityLevel(CompatibilityLevel.Version_170)
+                            .UseSimpleAssemblyNameTypeSerializer()
+                            .UseRecommendedSerializerSettings();
                         foreach (var connectionString in Databases.Keys) {
-                            var storage = new MySqlStorage(connectionString, new MySqlStorageOptions());
+                            var storage = new MySqlStorage(connectionString, new MySqlStorageOptions{
+                                QueuePollInterval = TimeSpan.FromSeconds(1), // Make job processing more responsive
+                                JobExpirationCheckInterval = TimeSpan.FromHours(1) // Ensure jobs don't expire too soon
+                            });
                             config.UseStorage(storage);
                         }
                     });
