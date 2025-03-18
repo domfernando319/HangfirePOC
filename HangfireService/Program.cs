@@ -115,7 +115,7 @@ namespace HangfireService {
             }
 
             Console.WriteLine("Tenant Background Services Running. Press ENTER to exit.");
-            await host.RunAsync();
+            await host.WaitForShutdownAsync();
         }
     }
 }
