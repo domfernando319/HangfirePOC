@@ -73,7 +73,7 @@ namespace HangfireService {
             using var host = Host.CreateDefaultBuilder()
                 .ConfigureServices((context, services) => {
                     services.AddSingleton<ITenantService, TenantService>();
-                    services.AddSingleton<ITenantJobService, TenantJobService>();
+                    services.AddTransient<ITenantJobService, TenantJobService>();
                     // services.AddSingleton(databases);
                     // services.AddHostedService<TenantBackgroundService>(); // Run background service
                     services.AddHangfire(config => {
@@ -100,7 +100,7 @@ namespace HangfireService {
                     service => service.LogMessage(connString), 
                     TimeSpan.FromSeconds(interval)
                 );
-                
+
                 // Static BackgroundJob API
                 // BackgroundJob.Schedule<ITenantJobService>(
                 //     service => service.LogMessage(connString), 
