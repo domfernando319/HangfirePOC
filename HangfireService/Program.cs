@@ -96,8 +96,8 @@ namespace HangfireService {
                 await tenantService.EnsureDatabaseAndTableExist(connString);
 
                 // ***** Use IBackgroundJobClient instead of static BackgroundJob API
-                backgroundJobClient.Schedule<ITenantJobService>(
-                    service => service.LogMessage(connString), 
+                backgroundJobClient.Schedule(
+                    () => tenantJobService.LogMessage(connString), 
                     TimeSpan.FromSeconds(interval)
                 );
 
