@@ -23,14 +23,14 @@ namespace HangfireService {
                 await connection.OpenAsync();
 
                 string createTableQuery = @"
-                    CREATE TABLE IF NOT EXISTS Log (
+                    CREATE TABLE IF NOT EXISTS Message (
                         Id INT AUTO_INCREMENT PRIMARY KEY,
                         Message TEXT NOT NULL,
                         CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );";
                 using var cmd = new MySqlCommand(createTableQuery, connection);
                 await cmd.ExecuteNonQueryAsync();
-                Console.WriteLine($"SUCCESS: Table 'Log' ensured in database: {connection.Database}");
+                Console.WriteLine($"SUCCESS: Table 'Message' ensured in database: {connection.Database}");
             } catch (Exception e) {
                 Console.WriteLine($"ERROR: {e.Message}");
             }
@@ -41,26 +41,27 @@ namespace HangfireService {
         Task LogMessage(string connectionString);
     }
     public class TenantJobService : ITenantJobService {
-        private readonly IBackgroundJobClient _jobClient;
+        private readonly Dictionary<string, IBackgroundJobClient> _jobClients;
 
-        public TenantJobService(IBackgroundJobClient jobClient) {
-            _jobClient = jobClient;
+        // Modified constructor to accept tenant-specific job clients
+        public TenantJobService(Dictionary<string, IBackgroundJobClient> jobClients) {
+            _jobClients = jobClients;
         }
         public async Task LogMessage(string connectionString) {
             try {
                 using var conn = new MySqlConnection(connectionString);
                 await conn.OpenAsync();
 
-                string insertQuery = "INSERT INTO Log (Message) VALUES (@message)";
+                string insertQuery = "INSERT INTO Message (Message) VALUES (@message)";
                 using var cmd = new MySqlCommand(insertQuery, conn);
                 cmd.Parameters.AddWithValue("@message", $"Logged at {DateTime.Now}");
 
                 await cmd.ExecuteNonQueryAsync();
-                Console.WriteLine($"[{DateTime.Now}] SUCCESS: Log inserted into {conn.Database}");
+                Console.WriteLine($"[{DateTime.Now}] SUCCESS: Message inserted into {conn.Database}");
 
                 // ***Schedule the next execution dynamically using tenant specific storage
                 var interval = Program.Databases[connectionString];
-                _jobClient.Schedule<ITenantJobService>(
+                _jobClients[connectionString].Schedule<ITenantJobService>(
                     service => service.LogMessage(connectionString), 
                     TimeSpan.FromSeconds(interval)
                 );
@@ -73,7 +74,7 @@ namespace HangfireService {
     static class Program {
         public static readonly Dictionary<string, int> Databases = new()
         {
-            { "Server=localhost;Database=HangfireDB1;User=root;Password=0319;", 15 }, // 1-second interval
+            { "Server=localhost;Database=HangfireDB1;User=root;Password=0319;", 10 }, // 1-second interval
             { "Server=localhost;Database=HangfireDB2;User=root;Password=0319;", 30 }  // 5-second interval
         };
 
@@ -91,34 +92,40 @@ namespace HangfireService {
                 .ConfigureServices((context, services) => {
                     services.AddSingleton<ITenantService, TenantService>();
                     services.AddTransient<ITenantJobService, TenantJobService>();
-                    
+
+                    var jobClients = new Dictionary<string, IBackgroundJobClient>();
                     //Configure Hangfire with seperate storage per tenant
                     foreach (var (connectionString, _) in Databases) {
                         var storageOptions = new MySqlStorageOptions {
                             QueuePollInterval = TimeSpan.FromSeconds(1),
-                            JobExpirationCheckInterval = TimeSpan.FromHours(1)
+                            JobExpirationCheckInterval = TimeSpan.FromHours(1),
+                            PrepareSchemaIfNecessary = true
                         };
 
                         var storage = new MySqlStorage(connectionString, storageOptions);
                         TenantStorages[connectionString] = storage;
+                        jobClients[connectionString] = new BackgroundJobClient(storage);
 
-                        //register Hangfire server for this tenant's storage
-                        services.AddHangfire(config => config
+                        string dbName = GetDatabaseNameFromConnectionString(connectionString);
+                    
+                        // Configure Hangfire with specific storage
+                        services.AddHangfire((provider, config) => config
                             .SetDataCompatibilityLevel(CompatibilityLevel.Version_170)
                             .UseSimpleAssemblyNameTypeSerializer()
                             .UseRecommendedSerializerSettings()
-                            .UseStorage(storage)
-                        );
+                            .UseStorage(storage));
 
-                        // Get database name from connection string
-                        string dbName = GetDatabaseNameFromConnectionString(connectionString);
-                        // Add dedicated Hangfire server for this tenant
-                        services.AddHangfireServer(options => {
+                        // Configure server for this specific tenant
+                        services.AddHangfireServer((provider, options) => {
                             options.ServerName = $"Server-{dbName}";
-                            options.Queues = new[] { $"queue-{dbName.ToLower()}" }; // Unique queue per tenant
+                            options.Queues = new[] { $"queue-{dbName.ToLower()}", "default" };
+                            options.WorkerCount = 2; // Adjust based on your needs]
                         });
-                        
                     }
+                    // Register TenantJobService with job clients
+                    services.AddTransient<ITenantJobService>(provider => 
+                        new TenantJobService(jobClients));
+
                     // services.AddHangfire(config => {
                     //     config.SetDataCompatibilityLevel(CompatibilityLevel.Version_170)
                     //         .UseSimpleAssemblyNameTypeSerializer()
@@ -142,19 +149,13 @@ namespace HangfireService {
             var tenantJobService = scope.ServiceProvider.GetRequiredService<ITenantJobService>();
             var backgroundJobClient = scope.ServiceProvider.GetRequiredService<IBackgroundJobClient>();
 
-            // Create job clients for each tenant
-            var jobClients = new Dictionary<string, IBackgroundJobClient>();
-            foreach (var (connString, _) in Databases)
-            {
-                jobClients[connString] = new BackgroundJobClient(TenantStorages[connString]);
-            }
-
             // Initialize databases and schedule initial jobs
-            foreach (var (connString, interval) in Databases) {
+            foreach (var (connString, _) in Databases) {
                 await tenantService.EnsureDatabaseAndTableExist(connString);
                 
-                // Use tenant-specific job client
-                jobClients[connString].Enqueue<ITenantJobService>(
+                // Use tenant-specific job client directly from TenantStorages
+                var jobClient = new BackgroundJobClient(TenantStorages[connString]);
+                jobClient.Enqueue<ITenantJobService>(
                     service => service.LogMessage(connString)
                 );
             }
