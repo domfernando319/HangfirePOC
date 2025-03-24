@@ -12,7 +12,7 @@ using Hangfire.AspNetCore;
 using MySqlConnector;
 using System.Data.Common;
 using System.Data.SqlClient;
-using System.ServiceProcess
+using System.ServiceProcess;
 
 namespace HangfireWindowsService {
     public interface ITenantService {
@@ -65,7 +65,7 @@ namespace HangfireWindowsService {
                 Console.WriteLine($"[{DateTime.Now}] SUCCESS: Message inserted into {conn.Database}");
 
                 // ***Schedule the next execution dynamically using tenant specific storage
-                var interval = Program.Databases[connectionString];
+                var interval = HangfireService.Databases[connectionString];
                 var dbName = new SqlConnectionStringBuilder(connectionString).InitialCatalog;
                 var queueName = $"queue-{dbName.ToLower()}";
                 var jobId = _jobClients[connectionString].Schedule<ITenantJobService>(
@@ -82,7 +82,7 @@ namespace HangfireWindowsService {
 
     public class HangfireService : ServiceBase {
         private IHost _host;
-        private static readonly Dictionary<string, int> Databases = new() {
+        public static readonly Dictionary<string, int> Databases = new() {
             { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB1;User Id=sa;Password=0319;", 10 },
             { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB2;User Id=sa;Password=0319;", 20 },
             { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB3;User Id=sa;Password=0319;", 30 },
@@ -95,7 +95,7 @@ namespace HangfireWindowsService {
             { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB10;User Id=sa;Password=0319;", 60 }
         };
 
-        public static readonly Dictionary<string, SqlServerStorage> TenantStorages = new();
+        private static readonly Dictionary<string, SqlServerStorage> TenantStorages = new();
 
         public HangfireService() {
             ServiceName = "HangfireTenantService";
@@ -188,7 +188,7 @@ namespace HangfireWindowsService {
 
     static class Program {
         static void Main(string[] args) {
-            if (args.Length > 0 && &args[0].ToLower() == "Console") {
+            if (args.Length > 0 && args[0].ToLower() == "Console") {
                 // Run as console for debugging
                 var service = new HangfireService();
                 service.OnStart(null);
