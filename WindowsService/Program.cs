@@ -12,8 +12,9 @@ using Hangfire.AspNetCore;
 using MySqlConnector;
 using System.Data.Common;
 using System.Data.SqlClient;
+using System.ServiceProcess
 
-namespace HangfireService {
+namespace HangfireWindowsService {
     public interface ITenantService {
         Task EnsureDatabaseAndTableExist(string connectionString);
     }
@@ -79,10 +80,10 @@ namespace HangfireService {
         }
     }
 
-    static class Program {
-        public static readonly Dictionary<string, int> Databases = new()
-        {
-            { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB1;User Id=sa;Password=0319;", 10 }, // Replace with your SQL Server password
+    public class HangfireService : ServiceBase {
+        private IHost _host;
+        private static readonly Dictionary<string, int> Databases = new() {
+            { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB1;User Id=sa;Password=0319;", 10 },
             { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB2;User Id=sa;Password=0319;", 20 },
             { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB3;User Id=sa;Password=0319;", 30 },
             { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB4;User Id=sa;Password=0319;", 40 },
@@ -96,24 +97,29 @@ namespace HangfireService {
 
         public static readonly Dictionary<string, SqlServerStorage> TenantStorages = new();
 
-        // Helper method to extract database name from connection string
-        private static string GetDatabaseNameFromConnectionString(string connectionString)
-        {
+        public HangfireService() {
+            ServiceName = "HangfireTenantService";
+        }
+
+        private static string GetDatabaseNameFromConnectionString(string connectionString) {
             var builder = new SqlConnectionStringBuilder(connectionString);
             return builder.InitialCatalog;
         }
 
-        static async Task Main() {
-            using var host = Host.CreateDefaultBuilder()
-                .ConfigureServices((context, services) => {
+        protected override void OnStart(string[] args)
+        {
+            _host = Host.CreateDefaultBuilder()
+                .ConfigureServices((context, services) =>
+                {
                     services.AddSingleton<ITenantService, TenantService>();
                     services.AddTransient<ITenantJobService, TenantJobService>();
 
                     var jobClients = new Dictionary<string, IBackgroundJobClient>();
 
-                    // Configure Hangfire for each tenant
-                    foreach (var (connectionString, _) in Databases) {
-                        var storageOptions = new SqlServerStorageOptions {
+                    foreach (var (connectionString, _) in Databases)
+                    {
+                        var storageOptions = new SqlServerStorageOptions
+                        {
                             QueuePollInterval = TimeSpan.FromSeconds(1),
                             CommandBatchMaxTimeout = TimeSpan.FromMinutes(5),
                             SlidingInvisibilityTimeout = TimeSpan.FromMinutes(5),
@@ -127,50 +133,71 @@ namespace HangfireService {
                         string dbName = GetDatabaseNameFromConnectionString(connectionString);
                         string queueName = $"queue-{dbName.ToLower()}";
 
-                        // Add Hangfire configuration for this tenant
                         services.AddHangfire((provider, config) => config
                             .SetDataCompatibilityLevel(CompatibilityLevel.Version_170)
                             .UseSimpleAssemblyNameTypeSerializer()
                             .UseRecommendedSerializerSettings()
                             .UseStorage(storage));
 
-                        // Add a dedicated Hangfire server for this tenant
-                        services.AddHangfireServer((provider, options) => {
+                        services.AddHangfireServer((provider, options) =>
+                        {
                             options.ServerName = $"Server-{dbName}";
-                            options.Queues = new[] {queueName}; // Match the queue used in Enqueue / Schedule
+                            options.Queues = new[] { queueName };
                             options.WorkerCount = 2;
-                            options.SchedulePollingInterval = TimeSpan.FromSeconds(1); // Faster job pickup
+                            options.SchedulePollingInterval = TimeSpan.FromSeconds(1);
                         }, storage);
                     }
 
-                    // Register TenantJobService with job clients
-                    services.AddTransient<ITenantJobService>(provider => 
+                    services.AddTransient<ITenantJobService>(provider =>
                         new TenantJobService(jobClients));
                 })
                 .Build();
 
-            using var scope = host.Services.CreateScope();
-            var tenantService = scope.ServiceProvider.GetRequiredService<ITenantService>();
-            var tenantJobService = scope.ServiceProvider.GetRequiredService<ITenantJobService>();
+            Task.Run(async () =>
+            {
+                using var scope = _host.Services.CreateScope();
+                var tenantService = scope.ServiceProvider.GetRequiredService<ITenantService>();
+                var tenantJobService = scope.ServiceProvider.GetRequiredService<ITenantJobService>();
 
-            // Initialize databases and schedule initial jobs
-            foreach (var (connString, _) in Databases) {
-                await tenantService.EnsureDatabaseAndTableExist(connString);
-                var dbName = GetDatabaseNameFromConnectionString(connString);
-                var queueName = $"queue-{dbName.ToLower()}";
-                var jobClient = new BackgroundJobClient(TenantStorages[connString]);
-                var jobId = jobClient.Enqueue<ITenantJobService>(
-                    queueName,
-                    service => service.LogMessage(connString)
-                );
-                Console.WriteLine($"[{DateTime.Now}] Enqueued job {jobId} for {dbName} on queue {queueName}");
+                foreach (var (connString, _) in Databases)
+                {
+                    await tenantService.EnsureDatabaseAndTableExist(connString);
+                    var dbName = GetDatabaseNameFromConnectionString(connString);
+                    var queueName = $"queue-{dbName.ToLower()}";
+                    var jobClient = new BackgroundJobClient(TenantStorages[connString]);
+                    var jobId = jobClient.Enqueue<ITenantJobService>(
+                        queueName,
+                        service => service.LogMessage(connString)
+                    );
+                    Console.WriteLine($"[{DateTime.Now}] Enqueued job {jobId} for {dbName} on queue {queueName}");
+                }
+
+                await _host.StartAsync();
+                Console.WriteLine($"[{DateTime.Now}] Hangfire Service Started");
+            });
+        }
+
+        protected override void OnStop()
+        {
+            _host?.StopAsync().Wait();
+            _host?.Dispose();
+            Console.WriteLine($"[{DateTime.Now}] Hangfire Service Stopped");
+        }
+
+    }
+
+    static class Program {
+        static void Main(string[] args) {
+            if (args.Length > 0 && &args[0].ToLower() == "Console") {
+                // Run as console for debugging
+                var service = new HangfireService();
+                service.OnStart(null);
+                Console.WriteLine("Running in console mode. Press any key to stop...");
+                Console.ReadKey();
+                service.OnStop();
+            } else {
+                ServiceBase.Run(new HangfireService());
             }
-
-            Console.WriteLine($"[{DateTime.Now}] Starting Hangfire servers...");
-            await host.StartAsync();
-            Console.WriteLine($"[{DateTime.Now}] Tenant Background Services Running. Press ENTER to exit.");
-            Console.ReadLine();
-            await host.StopAsync();
         }
     }
 }
