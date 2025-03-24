@@ -82,6 +82,8 @@ namespace HangfireWindowsService {
 
     public class HangfireService : ServiceBase {
         private IHost _host;
+        private IServiceProvider _services;
+        private List<IDisposable> _hangfireServers = new();
         public static readonly Dictionary<string, int> Databases = new() {
             { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB1;User Id=sa;Password=0319;", 10 },
             { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB2;User Id=sa;Password=0319;", 20 },
@@ -105,57 +107,48 @@ namespace HangfireWindowsService {
             var builder = new SqlConnectionStringBuilder(connectionString);
             return builder.InitialCatalog;
         }
-
-        protected override void OnStart(string[] args)
+        // Make this public for console mode access
+        public void Start()
         {
-            _host = Host.CreateDefaultBuilder()
-                .ConfigureServices((context, services) =>
+            var services = new ServiceCollection();
+            services.AddSingleton<ITenantService, TenantService>();
+            services.AddTransient<ITenantJobService, TenantJobService>();
+
+            var jobClients = new Dictionary<string, IBackgroundJobClient>();
+
+            foreach (var (connectionString, _) in Databases)
+            {
+                var storageOptions = new SqlServerStorageOptions { /* ... */ };
+                var storage = new SqlServerStorage(connectionString, storageOptions);
+                TenantStorages[connectionString] = storage;
+                jobClients[connectionString] = new BackgroundJobClient(storage);
+
+                string dbName = GetDatabaseNameFromConnectionString(connectionString);
+                string queueName = $"queue-{dbName.ToLower()}";
+
+                var config = new BackgroundJobServerOptions
                 {
-                    services.AddSingleton<ITenantService, TenantService>();
-                    services.AddTransient<ITenantJobService, TenantJobService>();
+                    ServerName = $"Server-{dbName}",
+                    Queues = new[] { queueName },
+                    WorkerCount = 2,
+                    SchedulePollingInterval = TimeSpan.FromSeconds(1)
+                };
 
-                    var jobClients = new Dictionary<string, IBackgroundJobClient>();
+                GlobalConfiguration.Configuration
+                    .SetDataCompatibilityLevel(CompatibilityLevel.Version_170)
+                    .UseSimpleAssemblyNameTypeSerializer()
+                    .UseRecommendedSerializerSettings()
+                    .UseStorage(storage);
 
-                    foreach (var (connectionString, _) in Databases)
-                    {
-                        var storageOptions = new SqlServerStorageOptions
-                        {
-                            QueuePollInterval = TimeSpan.FromSeconds(1),
-                            CommandBatchMaxTimeout = TimeSpan.FromMinutes(5),
-                            SlidingInvisibilityTimeout = TimeSpan.FromMinutes(5),
-                            PrepareSchemaIfNecessary = true
-                        };
+                _hangfireServers.Add(new BackgroundJobServer(config, storage));
+            }
 
-                        var storage = new SqlServerStorage(connectionString, storageOptions);
-                        TenantStorages[connectionString] = storage;
-                        jobClients[connectionString] = new BackgroundJobClient(storage);
-
-                        string dbName = GetDatabaseNameFromConnectionString(connectionString);
-                        string queueName = $"queue-{dbName.ToLower()}";
-
-                        services.AddHangfire((provider, config) => config
-                            .SetDataCompatibilityLevel(CompatibilityLevel.Version_170)
-                            .UseSimpleAssemblyNameTypeSerializer()
-                            .UseRecommendedSerializerSettings()
-                            .UseStorage(storage));
-
-                        services.AddHangfireServer((provider, options) =>
-                        {
-                            options.ServerName = $"Server-{dbName}";
-                            options.Queues = new[] { queueName };
-                            options.WorkerCount = 2;
-                            options.SchedulePollingInterval = TimeSpan.FromSeconds(1);
-                        }, storage);
-                    }
-
-                    services.AddTransient<ITenantJobService>(provider =>
-                        new TenantJobService(jobClients));
-                })
-                .Build();
+            services.AddTransient<ITenantJobService>(provider => new TenantJobService(jobClients));
+            _services = services.BuildServiceProvider();
 
             Task.Run(async () =>
             {
-                using var scope = _host.Services.CreateScope();
+                using var scope = _services.CreateScope();
                 var tenantService = scope.ServiceProvider.GetRequiredService<ITenantService>();
                 var tenantJobService = scope.ServiceProvider.GetRequiredService<ITenantJobService>();
 
@@ -172,32 +165,147 @@ namespace HangfireWindowsService {
                     Console.WriteLine($"[{DateTime.Now}] Enqueued job {jobId} for {dbName} on queue {queueName}");
                 }
 
-                await _host.StartAsync();
                 Console.WriteLine($"[{DateTime.Now}] Hangfire Service Started");
             });
         }
 
-        protected override void OnStop()
+        // Make this public for console mode access
+        public void Stop()
         {
-            _host?.StopAsync().Wait();
-            _host?.Dispose();
+            foreach (var server in _hangfireServers)
+            {
+                server.Dispose();
+            }
+            (_services as IDisposable)?.Dispose();
             Console.WriteLine($"[{DateTime.Now}] Hangfire Service Stopped");
         }
 
+        protected override void OnStart(string[] args)
+        {
+            Start();
+        }
+
+        protected override void OnStop()
+        {
+            Stop();
+        }
+        // protected override void OnStart(string[] args)
+        // {
+        //     _host = Host.CreateDefaultBuilder()
+        //         .UseWindowsService(options => // Added Windows Service registration
+        //         {
+        //             options.ServiceName = "HangfireTenantService";
+        //         })
+        //         .ConfigureServices((context, services) =>
+        //         {
+        //             services.AddSingleton<ITenantService, TenantService>();
+        //             services.AddTransient<ITenantJobService, TenantJobService>();
+
+        //             var jobClients = new Dictionary<string, IBackgroundJobClient>();
+
+        //             foreach (var (connectionString, _) in Databases)
+        //             {
+        //                 var storageOptions = new SqlServerStorageOptions
+        //                 {
+        //                     QueuePollInterval = TimeSpan.FromSeconds(1),
+        //                     CommandBatchMaxTimeout = TimeSpan.FromMinutes(5),
+        //                     SlidingInvisibilityTimeout = TimeSpan.FromMinutes(5),
+        //                     PrepareSchemaIfNecessary = true
+        //                 };
+
+        //                 var storage = new SqlServerStorage(connectionString, storageOptions);
+        //                 TenantStorages[connectionString] = storage;
+        //                 jobClients[connectionString] = new BackgroundJobClient(storage);
+
+        //                 string dbName = GetDatabaseNameFromConnectionString(connectionString);
+        //                 string queueName = $"queue-{dbName.ToLower()}";
+
+        //                 services.AddHangfire((provider, config) => config
+        //                     .SetDataCompatibilityLevel(CompatibilityLevel.Version_170)
+        //                     .UseSimpleAssemblyNameTypeSerializer()
+        //                     .UseRecommendedSerializerSettings()
+        //                     .UseStorage(storage));
+
+        //                 services.AddHangfireServer((provider, options) =>
+        //                 {
+        //                     options.ServerName = $"Server-{dbName}";
+        //                     options.Queues = new[] { queueName };
+        //                     options.WorkerCount = 2;
+        //                     options.SchedulePollingInterval = TimeSpan.FromSeconds(1);
+        //                 }, storage);
+        //             }
+
+        //             services.AddTransient<ITenantJobService>(provider =>
+        //                 new TenantJobService(jobClients));
+        //         })
+        //         .Build();
+
+        //     Task.Run(async () =>
+        //     {
+        //         using var scope = _host.Services.CreateScope();
+        //         var tenantService = scope.ServiceProvider.GetRequiredService<ITenantService>();
+        //         var tenantJobService = scope.ServiceProvider.GetRequiredService<ITenantJobService>();
+
+        //         foreach (var (connString, _) in Databases)
+        //         {
+        //             await tenantService.EnsureDatabaseAndTableExist(connString);
+        //             var dbName = GetDatabaseNameFromConnectionString(connString);
+        //             var queueName = $"queue-{dbName.ToLower()}";
+        //             var jobClient = new BackgroundJobClient(TenantStorages[connString]);
+        //             var jobId = jobClient.Enqueue<ITenantJobService>(
+        //                 queueName,
+        //                 service => service.LogMessage(connString)
+        //             );
+        //             Console.WriteLine($"[{DateTime.Now}] Enqueued job {jobId} for {dbName} on queue {queueName}");
+        //         }
+
+        //         await _host.StartAsync();
+        //         Console.WriteLine($"[{DateTime.Now}] Hangfire Service Started");
+        //     });
+        // }
+
+        // protected override void OnStop()
+        // {
+        //     _host?.StopAsync().Wait();
+        //     _host?.Dispose();
+        //     Console.WriteLine($"[{DateTime.Now}] Hangfire Service Stopped");
+        // }
+
     }
 
-    static class Program {
-        static void Main(string[] args) {
-            if (args.Length > 0 && args[0].ToLower() == "Console") {
-                // Run as console for debugging
-                var service = new HangfireService();
-                service.OnStart(null);
+    static class Program
+    {
+        static void Main(string[] args)
+        {
+            var service = new HangfireService();
+
+            if (args.Length > 0 && args[0].ToLower() == "console")
+            {
+                // Run in console mode
+                service.Start();
                 Console.WriteLine("Running in console mode. Press any key to stop...");
                 Console.ReadKey();
-                service.OnStop();
-            } else {
-                ServiceBase.Run(new HangfireService());
+                service.Stop();
+            }
+            else
+            {
+                // Run as Windows Service
+                ServiceBase.Run(service);
             }
         }
     }
+    // static class Program {
+    //     static void Main(string[] args) {
+    //         if (args.Length > 0 && args[0].ToLower() == "Console") {
+    //             // Run as console for debugging
+    //             var service = new HangfireService();
+    //             service.OnStart(null);
+    //             Console.WriteLine("Running in console mode. Press any key to stop...");
+    //             Console.ReadKey();
+    //             service.OnStop();
+    //         } else {
+    //             ServiceBase.Run(new HangfireService());
+    //         }
+    //     }
+    // }
 }
