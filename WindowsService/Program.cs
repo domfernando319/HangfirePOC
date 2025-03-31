@@ -115,6 +115,7 @@ namespace HangfireWindowsService {
             } catch (Exception e) {
                 // Console.WriteLine($"ERROR: {e.Message}");
             }
+        }
     }
 
     public class HangfireService : ServiceBase {
