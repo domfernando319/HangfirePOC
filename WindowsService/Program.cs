@@ -15,8 +15,16 @@ using Hangfire.AspNetCore;
 using MySqlConnector;
 using System.Data.Common;
 using System.Data.SqlClient;
+using Microsoft.Extensions.Configuration;
+using System.Configuration;
 
 namespace HangfireWindowsService {
+
+    public class TenantConfig
+    {
+        public string ConnectionString { get; set; }
+        public int IntervalSeconds { get; set; }
+    }
 
     // Custom JobActivator to use IServiceProvider
     public class ServiceProviderJobActivator : JobActivator
@@ -74,10 +82,12 @@ namespace HangfireWindowsService {
     }
     public class TenantJobService : ITenantJobService {
         private readonly Dictionary<string, IBackgroundJobClient> _jobClients;
+        private readonly IConfiguration _configuration;
 
         // Modified constructor to accept tenant-specific job clients
-        public TenantJobService(Dictionary<string, IBackgroundJobClient> jobClients) {
+        public TenantJobService(Dictionary<string, IBackgroundJobClient> jobClients, IConfiguration configuration) {
             _jobClients = jobClients;
+            _configuration = configuration;
         }
         public async Task LogMessage(string connectionString) {
             try {
@@ -111,23 +121,13 @@ namespace HangfireWindowsService {
         private IHost _host;
         private IServiceProvider _services;
         private List<IDisposable> _hangfireServers = new();
-        public static readonly Dictionary<string, int> Databases = new() {
-            { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB1;User Id=sa;Password=0319;", 10 },
-            { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB2;User Id=sa;Password=0319;", 20 },
-            { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB3;User Id=sa;Password=0319;", 30 },
-            { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB4;User Id=sa;Password=0319;", 40 },
-            { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB5;User Id=sa;Password=0319;", 50 },
-            { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB6;User Id=sa;Password=0319;", 60 },
-            { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB7;User Id=sa;Password=0319;", 60 },
-            { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB8;User Id=sa;Password=0319;", 60 },
-            { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB9;User Id=sa;Password=0319;", 60 },
-            { "Server=DUSFSpectre\\SQLEXPRESS;Database=HangfireDB10;User Id=sa;Password=0319;", 60 }
-        };
+        private readonly IConfiguration _configuration;
 
         private static readonly Dictionary<string, SqlServerStorage> TenantStorages = new();
 
-        public HangfireService() {
+        public HangfireService(IConfiguration configuration) {
             ServiceName = "HangfireTenantService";
+            _configuration = configuration;
             // Configure Serilog once during static initialization
             _logger = new LoggerConfiguration()
                 .MinimumLevel.Information() // Set minimum log level
@@ -215,7 +215,7 @@ namespace HangfireWindowsService {
             {
                 var services = new ServiceCollection();
                 services.AddSingleton<ITenantService, TenantService>();
-
+                services.AddSingleton(_configuration); // register IConfiguration
                 var jobClients = new Dictionary<string, IBackgroundJobClient>();
                 services.AddSingleton(jobClients); // Register jobClients so Hangfire can resolve Dictionary<string, IBackgroundJobClient> in DI container
                 
@@ -223,8 +223,10 @@ namespace HangfireWindowsService {
                 // Build the service provider early to use it with Hangfire
                 _services = services.BuildServiceProvider();
 
-                foreach (var (connectionString, _) in Databases)
+                var tenants = _configuration.GetSection("Tenants").Get<Dictionary<string, TenantConfig>>();
+                foreach (var (tenantName, tenantConfig) in tenants)
                 {
+                    var connectionString = tenantConfig.ConnectionString;
                     var storageOptions = new SqlServerStorageOptions { /* ... */ };
                     var storage = new SqlServerStorage(connectionString, storageOptions);
                     TenantStorages[connectionString] = storage;
@@ -262,8 +264,9 @@ namespace HangfireWindowsService {
                     var tenantService = scope.ServiceProvider.GetRequiredService<ITenantService>();
                     var tenantJobService = scope.ServiceProvider.GetRequiredService<ITenantJobService>();
 
-                    foreach (var (connString, _) in Databases)
+                    foreach (var (tenantName, tenantConfig) in tenants)
                     {
+                        var connString = tenantConfig.ConnectionString;
                         await tenantService.EnsureDatabaseAndTableExist(connString);
                         var dbName = GetDatabaseNameFromConnectionString(connString);
                         var queueName = $"queue-{dbName.ToLower()}";
@@ -317,7 +320,12 @@ namespace HangfireWindowsService {
     {
         static void Main(string[] args)
         {
-            var service = new HangfireService();
+            var configuration = new ConfigurationBuilder()
+                .SetBasePath(AppDomain.CurrentDomain.BaseDirectory)
+                .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
+                .Build();
+
+            var service = new HangfireService(configuration);
 
             if (args.Length > 0 && args[0].ToLower() == "console")
             {
