@@ -101,8 +101,10 @@ namespace HangfireWindowsService {
                 // Console.WriteLine($"[{DateTime.Now}] SUCCESS: Message inserted into {conn.Database}");
 
                 // ***Schedule the next execution dynamically using tenant specific storage
-                var interval = HangfireService.Databases[connectionString];
-                var dbName = new SqlConnectionStringBuilder(connectionString).InitialCatalog;
+                var tenants = _configuration.GetSection("Tenants").Get<Dictionary<string, TenantConfig>>();
+                var tenantConfig = tenants?[HangfireService.GetDatabaseNameFromConnectionString(connectionString)];
+                var interval = tenantConfig.IntervalSeconds;
+                var dbName = HangfireService.GetDatabaseNameFromConnectionString(connectionString);
                 var queueName = $"queue-{dbName.ToLower()}";
                 var jobId = _jobClients[connectionString].Schedule<ITenantJobService>(
                     queueName,
@@ -113,7 +115,6 @@ namespace HangfireWindowsService {
             } catch (Exception e) {
                 // Console.WriteLine($"ERROR: {e.Message}");
             }
-        }
     }
 
     public class HangfireService : ServiceBase {
@@ -138,7 +139,7 @@ namespace HangfireWindowsService {
                 .CreateLogger();
         }
 
-        private static string GetDatabaseNameFromConnectionString(string connectionString) {
+        public static string GetDatabaseNameFromConnectionString(string connectionString) {
             var builder = new SqlConnectionStringBuilder(connectionString);
             return builder.InitialCatalog;
         }
