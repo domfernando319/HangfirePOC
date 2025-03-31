@@ -50,11 +50,11 @@ namespace HangfireWindowsService {
     }
 
     public interface ITenantService {
-        Task EnsureDatabaseAndTableExist(string connectionString);
+        Task EnsureDatabaseAndTableExist(string connectionString, bool isWindowsService);
     }
 
     public class TenantService : ITenantService {
-        public async Task EnsureDatabaseAndTableExist(string connectionString) {
+        public async Task EnsureDatabaseAndTableExist(string connectionString, bool isWindowsService) {
             try{
                 using var connection = new SqlConnection(connectionString);
                 await connection.OpenAsync();
@@ -70,15 +70,19 @@ namespace HangfireWindowsService {
                     END";
                 using var cmd = new SqlCommand(createTableQuery, connection);
                 await cmd.ExecuteNonQueryAsync();
-                // Console.WriteLine($"SUCCESS: Table 'Message' ensured in database: {connection.Database}");
+                if (!isWindowsService) {
+                    Console.WriteLine($"SUCCESS: Table 'Message' ensured in database: {connection.Database}");
+                }
             } catch (Exception e) {
-                // Console.WriteLine($"ERROR: {e.Message}");
+                if (!isWindowsService) {
+                    Console.WriteLine($"ERROR: {e.Message}");
+                }
             }
         }
     }
 
     public interface ITenantJobService {
-        Task LogMessage(string connectionString);
+        Task LogMessage(string connectionString, bool isWindowsService);
     }
     public class TenantJobService : ITenantJobService {
         private readonly Dictionary<string, IBackgroundJobClient> _jobClients;
@@ -89,7 +93,7 @@ namespace HangfireWindowsService {
             _jobClients = jobClients;
             _configuration = configuration;
         }
-        public async Task LogMessage(string connectionString) {
+        public async Task LogMessage(string connectionString, bool isWindowsService) {
             try {
                 using var conn = new SqlConnection(connectionString);
                 await conn.OpenAsync();
@@ -98,22 +102,28 @@ namespace HangfireWindowsService {
                 using var cmd = new SqlCommand(insertQuery, conn);
                 cmd.Parameters.AddWithValue("@message", $"Logged at {DateTime.Now}");
                 await cmd.ExecuteNonQueryAsync();
-                // Console.WriteLine($"[{DateTime.Now}] SUCCESS: Message inserted into {conn.Database}");
+                if (!isWindowsService) {
+                    Console.WriteLine($"[{DateTime.Now}] SUCCESS: Message inserted into {conn.Database}");
+                }
 
                 // ***Schedule the next execution dynamically using tenant specific storage
                 var tenants = _configuration.GetSection("Tenants").Get<Dictionary<string, TenantConfig>>();
                 var tenantConfig = tenants?[HangfireService.GetDatabaseNameFromConnectionString(connectionString)];
-                var interval = tenantConfig.IntervalSeconds;
+                var interval = tenantConfig?.IntervalSeconds ?? 60;
                 var dbName = HangfireService.GetDatabaseNameFromConnectionString(connectionString);
                 var queueName = $"queue-{dbName.ToLower()}";
                 var jobId = _jobClients[connectionString].Schedule<ITenantJobService>(
                     queueName,
-                    service => service.LogMessage(connectionString), 
+                    service => service.LogMessage(connectionString, isWindowsService), 
                     TimeSpan.FromSeconds(interval)
                 );
-                // Console.WriteLine($"[{DateTime.Now}] Scheduled job {jobId} for {dbName} on queue {queueName}");
+                if (!isWindowsService) {
+                    Console.WriteLine($"[{DateTime.Now}] Scheduled job {jobId} for {dbName} on queue {queueName}");
+                }
             } catch (Exception e) {
-                // Console.WriteLine($"ERROR: {e.Message}");
+                if (!isWindowsService) {
+                    Console.WriteLine($"ERROR: {e.Message}");
+                }
             }
         }
     }
@@ -269,7 +279,7 @@ namespace HangfireWindowsService {
                     foreach (var (tenantName, tenantConfig) in tenants)
                     {
                         var connString = tenantConfig.ConnectionString;
-                        await tenantService.EnsureDatabaseAndTableExist(connString);
+                        await tenantService.EnsureDatabaseAndTableExist(connString, isWindowsService);
                         var dbName = GetDatabaseNameFromConnectionString(connString);
                         var queueName = $"queue-{dbName.ToLower()}";
                         var jobClient = new BackgroundJobClient(TenantStorages[connString]);
@@ -277,7 +287,7 @@ namespace HangfireWindowsService {
                         // Enqueue with the interface, resolved by DI
                         var jobId = jobClient.Enqueue<ITenantJobService>(
                             queueName,
-                            service => service.LogMessage(connString)
+                            service => service.LogMessage(connString, isWindowsService)
                         );
                         if (!isWindowsService)
                         {
