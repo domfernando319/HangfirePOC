@@ -19,6 +19,7 @@ using Microsoft.Extensions.Configuration;
 using System.Configuration;
 using HangfireWindowsService.models;
 using HangfireWindowsService.services;
+using System.Configuration.Install;
 
 namespace HangfireWindowsService {
     static class Program
